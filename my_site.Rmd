@@ -4,27 +4,165 @@ author: "Tyler Cobian"
 date: "2/6/2020"
 output: html_document
 ---
-
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(here)
+library(paletteer)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(feasts)
+library(forecast)
+library(sf)
+library(tmap)
+library(mapview)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+## Monthly US energy consumption (renewables)
+```{r}
+us_renew<- read_csv(here("data", "renewables_cons_prod.csv")) %>% 
+  clean_names()
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+- Make the descriptions all lowercase
+- Only keep observations where "desription" variable contains "consumption"
+- Remove any observation where "description" variable contains "total"
+```{r}
+us_renew_clean<- us_renew %>% 
+  mutate(description = str_to_lower(description)) %>% 
+  filter(str_detect(description, pattern = "consumption")) %>% 
+  filter(!str_detect(description, pattern = "total"))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### Convert `yyyymm` column as a date
+```{r}
+renew_date<- us_renew_clean %>% 
+  mutate(yr_mo_day = lubridate::parse_date_time(yyyymm, "ym")) %>% 
+  mutate(month_sep = yearmonth(yr_mo_day)) %>% 
+  mutate(value = as.numeric(value)) %>% 
+  drop_na(month_sep, value)
+# make a version where the month and year are in seperate columns
+renew_pased<- renew_date %>% 
+  mutate(month = month(yr_mo_day, label = TRUE)) %>% 
+  mutate(year = year(yr_mo_day))
+```
+
+### Look at the new data:
+```{r}
+renew_gg<- ggplot(renew_date, aes(x = month_sep, 
+                                  y = value, 
+                                  group = description,  
+                                  color = description))+
+  geom_line()
+renew_gg
+```
+
+Updating colors with paletter palettes:
+```{r}
+# Look here for adding new color palettes to graphs
+# in scale_color_paletter_d the "d" stands for discrete you can put "c" and get continuous palettes
+# type this in View(palettes_d_names) to view all the palettes
+renew_gg+
+  scale_color_paletteer_d("calecopal::bigsur")+
+  theme_minimal()
+```
+
+Coaerce the renew_parse to a tsibble
+```{r}
+renew_ts<- as_tsibble(renew_pased, key = description, index = month_sep)
+```
+
+Look at the new data in a couple different ways
+```{r}
+renew_ts %>% 
+  autoplot(value)
+renew_ts %>% 
+  gg_subseries(value)
+# make a graph of season 
+ggplot(renew_pased, aes(x = month,
+                        y = value,
+                        group = year))+
+  geom_line(aes(color = year))+
+  facet_wrap(~description,
+             ncol = 1,
+             scales = "free",
+             strip.position = "right")
+```
+
+```{r}
+hydro_ts<- renew_ts %>% 
+  filter(description == "hydroelectric power consumption")
+hydro_ts %>% 
+  autoplot(value)
+hydro_ts %>% 
+  gg_subseries(value)
+
+ggplot(hydro_ts, aes(x = year, y = value, group = year))+
+  geom_line(aes(color = year))
+```
+
+What is I want the quarterly average consumption for hydro
+```{r}
+hydro_quarterly<- hydro_ts %>% 
+  index_by(year_qu = ~(yearquarter(.))) %>% 
+  summarise(avg_consumption = mean(value))
+head(hydro_quarterly)
+```
+
+### decompose the hydro_ts data
+```{r}
+dcmp<- hydro_ts %>% 
+  model(STL(value ~ season(window = 5)))
+
+components(dcmp) %>% 
+  autoplot()
+```
+
+```{r}
+hist(components(dcmp)$remainder)
+```
+
+Now lets look at the ACF:
+```{r}
+hydro_ts %>% 
+  ACF(value) %>% 
+  autoplot()
+```
+
+#Model (if you want to do this on your own beware)
+```{r}
+hydro_model<- hydro_ts %>% 
+  model(
+    ARIMA(value), # ARIMA model
+    ETS(value) # ETS model (ignores seasonality)
+  ) %>% 
+  fabletools::forecast(h = "4 years")
+
+hydro_model %>% 
+  autoplot(filter(hydro_ts, year(month_sep)>2010))
+```
+
+### Make a world map
+```{r}
+world <- read_sf(dsn = here("data","TM_WORLD_BORDERS_SIMPL-0.3-1"), layer = "TM_WORLD_BORDERS_SIMPL-0.3") %>% clean_names()
+
+# Quick & easy option to see those polygons (also for points, lines!)
+mapview(world)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
